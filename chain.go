@@ -199,12 +199,14 @@ func validate(chain Call, fn ...interface{}) (interface{}, error) {
 	var okay bool
 
 	var V Validating
-	if cn, ok := chain.(*chainNode); ok && cn.validator != nil {
-		V, okay = cn.validator.(Validating)
+	if cn, ok := chain.(*chainNode); ok {
+		if cn.validator != nil {
+			V = cn.validator
+			okay = true
+		}
 	}
 
 	if okay {
-		//log.Printf("VALIDATE: %v",reflect.TypeOf(fn))''
 		if V != nil {
 			okay, err = V.Validate(fn...)
 			if err == nil && !okay {
@@ -216,6 +218,9 @@ func validate(chain Call, fn ...interface{}) (interface{}, error) {
 		if err == nil && !okay {
 			err = ErrChainInvalidType
 		}
+	} else {
+		okay = true
+		//log.Printf("VALIDATE: %v",chain)
 	}
 
 	if err == nil && okay {
@@ -498,7 +503,9 @@ func (root *chainNode) IterateAll() <-chan Call {
 	C := make(chan Call, 0)
 	go func(cn *chainNode, c chan<- Call) {
 		defer close(c)
-		for cnext := cn.getNext(); cn != nil; cn = cnext {
+		var cnext *chainNode
+		for ; cn != nil; cn = cnext {
+			cnext = cn.getNext()
 			select {
 			case c <- cn:
 			case <-time.After(time.Duration(10) * time.Second):
