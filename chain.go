@@ -216,12 +216,15 @@ func assertCall(chain Call, fp interface{}, e error) (i interface{}, err error) 
 	err = e
 	if fp != nil && err == nil {
 		if val, ok = fp.(reflect.Value); !ok {
-			if _, ok = fp.(CallProxy); ok {
+			val = reflect.ValueOf(fp)
+			T = reflect.TypeOf(fp)
+			// NB: CallProxy interfaces are allowed even if they are aren't funcs,
+			// this allows apps to fake the reflection interface on their own
+			// receivers.
+			if _, ok := fp.(CallProxy); ok && T.Kind() != reflect.Func {
 				i = fp
 				return
 			}
-			val = reflect.ValueOf(fp)
-			T = reflect.TypeOf(fp)
 		}
 	}
 	if val.IsValid() {
@@ -243,6 +246,7 @@ func assertCall(chain Call, fp interface{}, e error) (i interface{}, err error) 
 	i = fp
 	return
 }
+
 func validate(chain Call, fn ...interface{}) (interface{}, error) {
 	var err error
 	var okay bool
@@ -431,12 +435,22 @@ func (cn *chainNode) getNext() (n *chainNode) {
 	return
 }
 
+// just like reflect.ValueOf but give us a pass on CallProxy
+// fakes by not reflecting them.
+func valueOf(i interface{}) CallProxy {
+	if cp, ok := i.(CallProxy); ok {
+		return cp
+	}
+
+	return reflect.ValueOf(i)
+}
+
 func (cn *chainNode) Before(fn ...interface{}) (Predicate, error) {
 	n := cn.insertBefore()
 
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, reflect.ValueOf(f))
+		n.funcs = append(n.funcs, valueOf(f))
 	}
 	return n, err
 }
@@ -445,7 +459,7 @@ func (cn *chainNode) After(fn ...interface{}) (Predicate, error) {
 	n := cn.insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, reflect.ValueOf(f))
+		n.funcs = append(n.funcs, valueOf(f))
 	}
 	return n, err
 }
@@ -454,7 +468,7 @@ func (cn *chainNode) First(fn ...interface{}) (Predicate, error) {
 	n := cn.getFirst().insertBefore()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, reflect.ValueOf(f))
+		n.funcs = append(n.funcs, valueOf(f))
 	}
 	return n, err
 }
@@ -463,7 +477,7 @@ func (cn *chainNode) Last(fn ...interface{}) (Predicate, error) {
 	n := cn.getLast().insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, reflect.ValueOf(f))
+		n.funcs = append(n.funcs, valueOf(f))
 	}
 	return n, err
 }
@@ -472,7 +486,7 @@ func (cn *chainNode) Register(fn ...interface{}) (Predicate, error) {
 	//log.Printf("REGISTER %v",fn)
 	f, err := validate(cn, fn...)
 	if err == nil && f != nil {
-		cn.funcs = append(cn.funcs, reflect.ValueOf(f))
+		cn.funcs = append(cn.funcs, valueOf(f))
 	}
 	return cn, err
 }

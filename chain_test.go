@@ -3,6 +3,7 @@ package chain_test
 import (
 	"fmt"
 	_ "log"
+	"reflect"
 	"testing"
 
 	"github.com/jsipprell/go-chain"
@@ -11,9 +12,22 @@ import (
 type TestFunc func(*testing.T)
 type TestVariadicFunc func(*testing.T, ...string)
 
+type TestWrapper struct {
+	Score int
+	fp    reflect.Value
+}
+
 var (
 	testChain chain.Root
 )
+
+func (tw *TestWrapper) Call(in []reflect.Value) (out []reflect.Value) {
+	in = append(in, reflect.Value{})
+	copy(in[1:], in[0:])
+	in[0] = reflect.ValueOf(tw.Score)
+	tw.fp.Call(in)
+	return
+}
 
 func initChain() {
 	testChain = chain.New()
@@ -108,5 +122,48 @@ func TestVariadicTypedChain(t *testing.T) {
 	}
 
 	c.Run(t, "e", "f", "g", "h")
+	t.Log("done")
+}
+
+func TestFilter1(t *testing.T) {
+	validation := &chain.ValidationFilter{
+		V: chain.ValidationFunc(func(i ...interface{}) (ok bool, err error) {
+			ok = (len(i) == 2)
+			if ok {
+				_, ok = i[0].(int)
+			}
+			return
+		}),
+		F: chain.FilterFunc(func(i ...interface{}) (out interface{}, err error) {
+			if len(i) == 2 {
+				T := reflect.TypeOf(i[1])
+				_ = T
+				out = &TestWrapper{
+					Score: i[0].(int),
+					fp:    reflect.ValueOf(i[1]),
+				}
+				return
+			}
+			panic("failure")
+		}),
+	}
+
+	filter := func(i interface{}, args []interface{}) bool {
+		o := i.(*TestWrapper)
+		t.Logf("TestWrapper %d", o.Score)
+		return true
+	}
+	c := chain.NewValidating(validation)
+	_, err := c.Register(1, func(x int) {
+		t.Logf("#%d", x)
+		if x != 1 {
+			t.Fatal("incorrect argument")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("start")
+	c.RunFiltered(filter)
 	t.Log("done")
 }
