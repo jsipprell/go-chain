@@ -3,10 +3,13 @@ package chain_test
 import (
 	"fmt"
 	_ "log"
-	_ "testing"
+	"testing"
 
 	"github.com/jsipprell/go-chain"
 )
+
+type TestFunc func(*testing.T)
+type TestVariadicFunc func(*testing.T, ...string)
 
 var (
 	testChain chain.Root
@@ -58,11 +61,7 @@ func initChain() {
 func ExampleChain() {
 	initChain()
 
-	r := func(i interface{}, args []interface{}) {
-		_ = args
-		i.(func())()
-	}
-	testChain.Run(r)
+	testChain.Run()
 	// Output:
 	// very first
 	// even more before 1
@@ -71,4 +70,43 @@ func ExampleChain() {
 	// before 1
 	// startup 1
 	// very last
+}
+
+func TestTypedChain(t *testing.T) {
+	c := chain.NewTyped(TestFunc(nil))
+	_, err := c.Register(func(x *testing.T) { x.Log("success") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("start")
+	c.Run(t)
+	t.Log("done")
+}
+
+func TestVariadicTypedChain(t *testing.T) {
+	c := chain.NewTyped(TestVariadicFunc(nil))
+	pred, err := c.Register(func(x *testing.T, vals ...string) {
+		for i, l := range vals {
+			x.Logf("%d: %v", i+1, l)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("start")
+	c.Run(t, "a", "b", "c", "d")
+	if _, err := pred.After(func(x *testing.T) { x.Log("should never see this") }); err == nil {
+		t.Fatal("expected exception didn't occur")
+	} else {
+		_, err = pred.After(func(x *testing.T, vals ...string) {
+			x.Logf("%v", vals)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c.Run(t, "e", "f", "g", "h")
+	t.Log("done")
 }

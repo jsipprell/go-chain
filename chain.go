@@ -27,8 +27,9 @@ package chain // import "github.com/jsipprell/go-chain"
 
 import (
 	"errors"
-	_ "log"
-	_ "reflect"
+	"fmt"
+	"log"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -36,6 +37,7 @@ import (
 var (
 	ErrChainInvalidType = errors.New("attempt to register call chain using an invalid type")
 	ErrChainNoWaiter    = errors.New("chain node has no waiter")
+	ErrChainNotFunc     = errors.New("attempt to register a non-func")
 )
 
 type (
@@ -45,6 +47,16 @@ type (
 
 	Filtering interface {
 		Filter(...interface{}) (interface{}, error)
+	}
+
+	// CallProxy allows filters to return data objects that are not themselves
+	// reflected values but shouldn't be reflected and checked for the correct
+	// signature type. Instead the Call method will be invoked in place of
+	// the standard reverse-reflection call and thus filters can inject
+	// their own transparent data. Filter which do this are responsible for
+	// completing the entire call to the application.
+	CallProxy interface {
+		Call(in []reflect.Value) (out []reflect.Value)
 	}
 
 	// Call is the most basic interface to a callchain node. It represents
@@ -144,11 +156,13 @@ type (
 		// Iterate over all the call chain nodes in execution order
 		IterateAll() <-chan Call
 
-		// Run the entire call chain, passing args to each function by way
-		// of a caller supplied function that should assert the correct type
-		// for the end function. Correct usage of Validation and Filtering will
-		// ensure the types are always right.
-		Run(func(interface{}, []interface{}), ...interface{})
+		// Run the entire call chain, passing addl args to each function in turn.
+		Run(...interface{})
+
+		// Run the entire call chain through a filter, all functions which the
+		// filter returns true for will be executed with the arguments passed
+		// to RunFiltered
+		RunFiltered(func(interface{}, []interface{}) bool, ...interface{})
 	}
 
 	Waiter interface {
@@ -194,6 +208,41 @@ func (v *ValidationFilter) Filter(i ...interface{}) (interface{}, error) {
 	return v.F(i...)
 }
 
+func assertCall(chain Call, fp interface{}, e error) (i interface{}, err error) {
+	var val reflect.Value
+	var T reflect.Type
+	var ok bool
+
+	err = e
+	if fp != nil && err == nil {
+		if val, ok = fp.(reflect.Value); !ok {
+			if _, ok = fp.(CallProxy); ok {
+				i = fp
+				return
+			}
+			val = reflect.ValueOf(fp)
+			T = reflect.TypeOf(fp)
+		}
+	}
+	if val.IsValid() {
+		if T.Kind() != reflect.Func {
+			err = ErrChainNotFunc
+			return
+		}
+		if cn, ok := chain.(*chainNode); ok && cn.ftype != nil {
+			if T.ConvertibleTo(cn.ftype) {
+				i = val.Convert(cn.ftype).Interface()
+				return
+			} else {
+				err = fmt.Errorf("%v is not compatible with %v", T, cn.ftype)
+				i = nil
+				return
+			}
+		}
+	}
+	i = fp
+	return
+}
 func validate(chain Call, fn ...interface{}) (interface{}, error) {
 	var err error
 	var okay bool
@@ -228,41 +277,83 @@ func validate(chain Call, fn ...interface{}) (interface{}, error) {
 			if FF, err := F.Filter(fn...); err != nil {
 				return nil, err
 			} else {
-				return FF, err
+				return assertCall(chain, FF, err)
 			}
 		}
 		if len(fn) > 0 {
-			return fn[0], err
+			return assertCall(chain, fn[0], err)
 		}
-		return fn, err
+		return assertCall(chain, fn, err)
 	}
 	return nil, err
 }
 
 type chainNode struct {
-	funcs  []interface{}
+	funcs  []CallProxy
 	wait   *sync.WaitGroup
 	before *chainNode
 	after  *chainNode
 
+	ftype     reflect.Type
 	validator Validating
 }
 
 // Returns a new root callchain that has no validator
 func New() Root {
 	return &chainNode{
-		funcs: make([]interface{}, 0, 1),
+		funcs: make([]CallProxy, 0, 1),
 		wait:  &sync.WaitGroup{},
 	}
 }
 
-// Returns a new root callchain that has a user supplied validator
+// Returns a new root callchain that can only have functions
+// of a specific type registered with it. To set this type
+// pass in a zero-value of the desired type. The type must
+// be a func, otherwise a panic will occur.
+//
+// Example:
+//
+//     type MyFunc func(int, []byte, f string, a ...string)
+//     var MyChain = chain.NewTyped(MyFunc(nil))
+//
+// NB: MyChain.Register() and friends at this point will
+// attempt to convert any arguments to MyFuncs and if
+// they are unable to do this will return an error.
+func NewTyped(t interface{}) Root {
+	var T reflect.Type = reflect.TypeOf(t)
+
+	if T.Kind() != reflect.Func {
+		log.Panicf("type <%v> is not a func", T)
+	}
+	return &chainNode{
+		funcs: make([]CallProxy, 0, 1),
+		wait:  &sync.WaitGroup{},
+		ftype: T,
+	}
+}
+
+// Returns a new root callchain that has a 	user supplied validator
 // and (optionally) filter.
 func NewValidating(validator Validating) Root {
 	return &chainNode{
-		funcs:     make([]interface{}, 0, 1),
+		funcs:     make([]CallProxy, 0, 1),
 		wait:      &sync.WaitGroup{},
 		validator: validator,
+	}
+}
+
+// A combination of NewTyped and NewValidating.
+func NewTypedValidating(t interface{}, validator Validating) Root {
+	var T reflect.Type = reflect.TypeOf(t)
+
+	if T.Kind() != reflect.Func {
+		log.Panicf("type <%v> is not a func", T)
+	}
+	return &chainNode{
+		funcs:     make([]CallProxy, 0, 1),
+		wait:      &sync.WaitGroup{},
+		validator: validator,
+		ftype:     T,
 	}
 }
 
@@ -279,11 +370,12 @@ func (cn *chainNode) SetValidator(v Validating) error {
 
 func clone(old *chainNode) (n *chainNode) {
 	n = &chainNode{
-		funcs: make([]interface{}, 0, 1),
+		funcs: make([]CallProxy, 0, 1),
 		wait:  &sync.WaitGroup{},
 	}
 	if old != nil {
 		n.validator = old.validator
+		n.ftype = old.ftype
 	}
 	return
 }
@@ -344,7 +436,7 @@ func (cn *chainNode) Before(fn ...interface{}) (Predicate, error) {
 
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, f)
+		n.funcs = append(n.funcs, reflect.ValueOf(f))
 	}
 	return n, err
 }
@@ -353,7 +445,7 @@ func (cn *chainNode) After(fn ...interface{}) (Predicate, error) {
 	n := cn.insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, f)
+		n.funcs = append(n.funcs, reflect.ValueOf(f))
 	}
 	return n, err
 }
@@ -362,7 +454,7 @@ func (cn *chainNode) First(fn ...interface{}) (Predicate, error) {
 	n := cn.getFirst().insertBefore()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, f)
+		n.funcs = append(n.funcs, reflect.ValueOf(f))
 	}
 	return n, err
 }
@@ -371,7 +463,7 @@ func (cn *chainNode) Last(fn ...interface{}) (Predicate, error) {
 	n := cn.getLast().insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
-		n.funcs = append(n.funcs, f)
+		n.funcs = append(n.funcs, reflect.ValueOf(f))
 	}
 	return n, err
 }
@@ -380,7 +472,7 @@ func (cn *chainNode) Register(fn ...interface{}) (Predicate, error) {
 	//log.Printf("REGISTER %v",fn)
 	f, err := validate(cn, fn...)
 	if err == nil && f != nil {
-		cn.funcs = append(cn.funcs, f)
+		cn.funcs = append(cn.funcs, reflect.ValueOf(f))
 	}
 	return cn, err
 }
@@ -432,44 +524,50 @@ func WaitGroup(chain Call) (wg *sync.WaitGroup) {
 }
 
 func (cn *chainNode) RunFiltered(filter func(interface{}, []interface{}) bool,
-	via func(interface{}, []interface{}),
 	args ...interface{}) {
+	vals := make([]reflect.Value, len(args))
+	for i, v := range args {
+		vals[i] = reflect.ValueOf(v)
+	}
 	gSync := &sync.WaitGroup{}
 	defer gSync.Wait()
 	var chainWait Waiter = NullWaiter
 
 	for n := range cn.IterateAll() {
 		wg := WaitGroup(n)
-		for fn := range n.Iterate(gSync) {
-			if !filter(fn, args) {
+		for fn := range iterate(n.(*chainNode), gSync) {
+			var i interface{}
+			if val, ok := fn.(reflect.Value); ok {
+				i = val.Interface()
+			} else {
+				i = fn
+			}
+			if !filter(i, args) {
 				gSync.Done()
 				wg.Done()
 				continue
 			}
-			go func(f interface{}, oWait Waiter, iWait *sync.WaitGroup, a []interface{}) {
+			go func(f CallProxy, oWait Waiter, iWait *sync.WaitGroup, in []reflect.Value) {
 				defer gSync.Done()
 				if iWait != nil {
 					defer iWait.Done()
 				}
 				oWait.Wait()
-				via(f, a)
-			}(fn, chainWait, wg, args)
-		}
-		if wg != nil {
-			chainWait = wg
+				_ = f.Call(in)
+			}(fn, chainWait, wg, vals)
 		}
 	}
 }
 
-func (cn *chainNode) Run(via func(interface{}, []interface{}), args ...interface{}) {
+func (cn *chainNode) Run(args ...interface{}) {
 	filt := func(interface{}, []interface{}) bool {
 		return true
 	}
-	cn.RunFiltered(filt, via, args...)
+	cn.RunFiltered(filt, args...)
 }
 
-func (cn *chainNode) Iterate(W ...*sync.WaitGroup) <-chan interface{} {
-	C := make(chan interface{}, len(cn.funcs))
+func iterate(cn *chainNode, W ...*sync.WaitGroup) <-chan CallProxy {
+	C := make(chan CallProxy, len(cn.funcs))
 	if cn.wait != nil {
 		W = append(W, cn.wait)
 	}
@@ -477,9 +575,9 @@ func (cn *chainNode) Iterate(W ...*sync.WaitGroup) <-chan interface{} {
 		addAll(1, W...)
 		defer doneAll(W...)
 	}
-	go func(funcs []interface{}, c chan<- interface{}, waits []*sync.WaitGroup) {
+	go func(funcs []CallProxy, c chan<- CallProxy, waits []*sync.WaitGroup) {
 		defer close(c)
-		var fn interface{}
+		var fn CallProxy
 		for _, fn = range funcs {
 			if len(waits) > 0 {
 				addAll(1, waits...)
@@ -494,6 +592,33 @@ func (cn *chainNode) Iterate(W ...*sync.WaitGroup) <-chan interface{} {
 			}
 		}
 	}(cn.funcs, C, W)
+	return C
+}
+
+func (cn *chainNode) Iterate(W ...*sync.WaitGroup) <-chan interface{} {
+	C := make(chan interface{}, 1)
+
+	W = append(W, nil)
+	if len(W) > 1 {
+		copy(W[1:], W[0:])
+	}
+	W[0] = &sync.WaitGroup{}
+	addAll(1, W...)
+	go func(inC <-chan CallProxy, outC chan<- interface{}, waits []*sync.WaitGroup) {
+		defer doneAll(waits...)
+		defer close(outC)
+		for {
+			c, ok := <-inC
+			if !ok {
+				return
+			}
+			if val, ok := c.(reflect.Value); ok {
+				outC <- val.Interface()
+			} else {
+				outC <- c
+			}
+		}
+	}(iterate(cn, W...), C, W)
 	return C
 }
 
