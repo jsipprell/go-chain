@@ -1,8 +1,8 @@
 Call Chains for Go
-------------------
+==================
 
 Description
-===========
+-----------
 
 Call chains are application-defined executable code entities (i.e. funcs)
 which all share a common signature and argument set. They can run either
@@ -17,23 +17,72 @@ may share data between themselves, usually via pointers.
 
 
 Example Usage
-=============
+-------------
 
-    var chainRoot chain.Root = ...
-    var chainWait chain.Waiter = chain.NullWaiter
-    var globalWait *sync.WaitGroup = &sync.WaitGroup{}
-    for callChain := range chainRoot.IterateAll() {
-        for fn := range callChain.Iterate(globalWait) {
-            go func(f func(), outerWait chain.Waiter, innerWait *sync.WaitGroup) {
-                defer globalWait.Done()
-                if innerWait != nil {
-                    defer innerWait.Done()
-                }
-                outerWait.Wait()
-                f()
-            }(fn.(func()),chainWait,chain.WaitGroup(callChain))
-        }
-        chainWait = chain.WaitGroup(callChain)
+```go
+
+package main
+
+import (
+    "fmt"
+    "github.com/jsipprell/go-chain"
+)
+
+var (
+    StartupChain chain.Root
+)
+
+func init() {
+    StartupChain = chain.New()
+    pred,err := StartupChain.Register(func() {
+        fmt.Println("startup 1")
+    })
+    if err != nil {
+        panic(err.Error())
     }
-    globalWait.Wait()
-    // from this point all callchains have finished in the correct order
+    pred,err = pred.Before(func() {
+        fmt.Println("before 1")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+    _,err = pred.Last(func() {
+        fmt.Println("very last")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+    pred,err = pred.Before(func() {
+        fmt.Println("even more before 1")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+    _,err = pred.After(func() {
+        fmt.Println("after even more before 1")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+    _,err = pred.Register(func() {
+        fmt.Println("about the same time as even more before 1")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+    _,err = pred.First(func() {
+        fmt.Println("very first")
+    })
+    if err != nil {
+        panic(err.Error())
+    }
+}
+
+func main() {
+    c := func(i interface{}, args []interface{}) {
+        _ = args
+        i.(func())()
+    }
+    StartupChain.Run(c)
+}
+```
