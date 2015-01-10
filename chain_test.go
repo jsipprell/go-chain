@@ -102,7 +102,7 @@ func TestChainLen(t *testing.T) {
 	initChain()
 
 	if l := testChain.Len(); l != 7 {
-		t.Fatalf("incorrect chain length, should be X instead of %d", l)
+		t.Fatalf("incorrect chain length, should be 7 instead of %d", l)
 	}
 	n := testChain.Middle()
 	n.Before(func(p Printing) {
