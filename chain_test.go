@@ -9,6 +9,11 @@ import (
 	"github.com/jsipprell/go-chain"
 )
 
+type Printing interface {
+	Println(...interface{})
+}
+type PrintingFunc func(...interface{})
+type PrintFunc func(Printing)
 type TestFunc func(*testing.T)
 type TestVariadicFunc func(*testing.T, ...string)
 
@@ -21,6 +26,10 @@ var (
 	testChain chain.Root
 )
 
+func (pf PrintingFunc) Println(v ...interface{}) {
+	pf(v...)
+}
+
 func (tw *TestWrapper) Call(in []reflect.Value) (out []reflect.Value) {
 	in = append(in, reflect.Value{})
 	copy(in[1:], in[0:])
@@ -30,42 +39,42 @@ func (tw *TestWrapper) Call(in []reflect.Value) (out []reflect.Value) {
 }
 
 func initChain() {
-	testChain = chain.New()
-	pred, err := testChain.Register(func() {
-		fmt.Println("startup 1")
+	testChain = chain.NewTyped(PrintFunc(nil))
+	pred, err := testChain.Register(func(p Printing) {
+		p.Println("startup 1")
 	})
 	if err != nil {
 		panic(err.Error())
 	}
-	pred, err = pred.Before(func() {
-		fmt.Println("before 1")
+	pred, err = pred.Before(func(p Printing) {
+		p.Println("before 1")
 	})
-	_, err = pred.Last(func() {
-		fmt.Println("very last")
-	})
-	if err != nil {
-		panic(err.Error())
-	}
-	pred, err = pred.Before(func() {
-		fmt.Println("even more before 1")
+	_, err = pred.Last(func(p Printing) {
+		p.Println("very last")
 	})
 	if err != nil {
 		panic(err.Error())
 	}
-	_, err = pred.After(func() {
-		fmt.Println("after even more before 1")
+	pred, err = pred.Before(func(p Printing) {
+		p.Println("even more before 1")
 	})
 	if err != nil {
 		panic(err.Error())
 	}
-	_, err = pred.Register(func() {
-		fmt.Println("about the same time as even more before 1")
+	_, err = pred.After(func(p Printing) {
+		p.Println("after even more before 1")
 	})
 	if err != nil {
 		panic(err.Error())
 	}
-	_, err = pred.First(func() {
-		fmt.Println("very first")
+	_, err = pred.Register(func(p Printing) {
+		p.Println("about the same time as even more before 1")
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	_, err = pred.First(func(p Printing) {
+		p.Println("very first")
 	})
 	if err != nil {
 		panic(err.Error())
@@ -75,7 +84,10 @@ func initChain() {
 func ExampleChain() {
 	initChain()
 
-	testChain.Run()
+	pf := PrintingFunc(func(v ...interface{}) {
+		fmt.Println(v...)
+	})
+	testChain.Run(pf)
 	// Output:
 	// very first
 	// even more before 1
@@ -84,6 +96,21 @@ func ExampleChain() {
 	// before 1
 	// startup 1
 	// very last
+}
+
+func TestChainLen(t *testing.T) {
+	initChain()
+
+	if l := testChain.Len(); l != 7 {
+		t.Fatalf("incorrect chain length, should be X instead of %d", l)
+	}
+	n := testChain.Middle()
+	n.Before(func(p Printing) {
+		p.Println("this is near the middle")
+	})
+	testChain.Run(PrintingFunc(func(v ...interface{}) {
+		t.Log(v...)
+	}))
 }
 
 func TestTypedChain(t *testing.T) {

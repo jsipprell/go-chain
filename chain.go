@@ -150,6 +150,12 @@ type (
 		// Returns the very last call chain node
 		Tail() Predicate
 
+		// Returns the (approximate) mid-point call chain node
+		Middle() Predicate
+
+		// Returns the *current* total number of registered calls
+		Len() int
+
 		Validator() Validating
 		SetValidator(Validating) error
 
@@ -293,6 +299,7 @@ func validate(chain Call, fn ...interface{}) (interface{}, error) {
 }
 
 type chainNode struct {
+	lock   sync.Locker
 	funcs  []CallProxy
 	wait   *sync.WaitGroup
 	before *chainNode
@@ -305,6 +312,7 @@ type chainNode struct {
 // Returns a new root callchain that has no validator
 func New() Root {
 	return &chainNode{
+		lock:  &sync.Mutex{},
 		funcs: make([]CallProxy, 0, 1),
 		wait:  &sync.WaitGroup{},
 	}
@@ -330,6 +338,7 @@ func NewTyped(t interface{}) Root {
 		log.Panicf("type <%v> is not a func", T)
 	}
 	return &chainNode{
+		lock:  &sync.Mutex{},
 		funcs: make([]CallProxy, 0, 1),
 		wait:  &sync.WaitGroup{},
 		ftype: T,
@@ -340,6 +349,7 @@ func NewTyped(t interface{}) Root {
 // and (optionally) filter.
 func NewValidating(validator Validating) Root {
 	return &chainNode{
+		lock:      &sync.Mutex{},
 		funcs:     make([]CallProxy, 0, 1),
 		wait:      &sync.WaitGroup{},
 		validator: validator,
@@ -354,6 +364,7 @@ func NewTypedValidating(t interface{}, validator Validating) Root {
 		log.Panicf("type <%v> is not a func", T)
 	}
 	return &chainNode{
+		lock:      &sync.Mutex{},
 		funcs:     make([]CallProxy, 0, 1),
 		wait:      &sync.WaitGroup{},
 		validator: validator,
@@ -378,8 +389,25 @@ func clone(old *chainNode) (n *chainNode) {
 		wait:  &sync.WaitGroup{},
 	}
 	if old != nil {
+		n.lock = old.lock
 		n.validator = old.validator
 		n.ftype = old.ftype
+	} else {
+		n.lock = &sync.Mutex{}
+	}
+	return
+}
+
+func chainLen(first *chainNode) (l int) {
+	for ; first != nil; first = first.after {
+		l += len(first.funcs)
+	}
+	return
+}
+
+func chainNodeLen(first *chainNode) (l int) {
+	for ; first != nil; first = first.after {
+		l += len(first.funcs) + 1
 	}
 	return
 }
@@ -414,6 +442,8 @@ func (cn *chainNode) getFirst() (n *chainNode) {
 }
 
 func (cn *chainNode) Head() Predicate {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	return cn.getFirst()
 }
 
@@ -425,6 +455,8 @@ func (cn *chainNode) getLast() (n *chainNode) {
 }
 
 func (cn *chainNode) Tail() Predicate {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	return cn.getLast()
 }
 
@@ -433,6 +465,26 @@ func (cn *chainNode) getNext() (n *chainNode) {
 		n = cn.after
 	}
 	return
+}
+
+func (cn *chainNode) Middle() Predicate {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
+
+	n := cn.getFirst()
+	l := chainNodeLen(n) / 2
+	for i := 0; i < l && n.after != nil; i += len(n.funcs) + 1 {
+		n = n.getNext()
+	}
+
+	return n
+}
+
+func (cn *chainNode) Len() int {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
+
+	return chainLen(cn.getFirst())
 }
 
 // just like reflect.ValueOf but give us a pass on CallProxy
@@ -446,6 +498,8 @@ func valueOf(i interface{}) CallProxy {
 }
 
 func (cn *chainNode) Before(fn ...interface{}) (Predicate, error) {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	n := cn.insertBefore()
 
 	f, err := validate(n, fn...)
@@ -456,6 +510,8 @@ func (cn *chainNode) Before(fn ...interface{}) (Predicate, error) {
 }
 
 func (cn *chainNode) After(fn ...interface{}) (Predicate, error) {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	n := cn.insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
@@ -465,6 +521,8 @@ func (cn *chainNode) After(fn ...interface{}) (Predicate, error) {
 }
 
 func (cn *chainNode) First(fn ...interface{}) (Predicate, error) {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	n := cn.getFirst().insertBefore()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
@@ -474,6 +532,8 @@ func (cn *chainNode) First(fn ...interface{}) (Predicate, error) {
 }
 
 func (cn *chainNode) Last(fn ...interface{}) (Predicate, error) {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	n := cn.getLast().insertAfter()
 	f, err := validate(n, fn...)
 	if err == nil && f != nil {
@@ -486,6 +546,8 @@ func (cn *chainNode) Register(fn ...interface{}) (Predicate, error) {
 	//log.Printf("REGISTER %v",fn)
 	f, err := validate(cn, fn...)
 	if err == nil && f != nil {
+		cn.lock.Lock()
+		defer cn.lock.Unlock()
 		cn.funcs = append(cn.funcs, valueOf(f))
 	}
 	return cn, err
@@ -539,6 +601,8 @@ func WaitGroup(chain Call) (wg *sync.WaitGroup) {
 
 func (cn *chainNode) RunFiltered(filter func(interface{}, []interface{}) bool,
 	args ...interface{}) {
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
 	vals := make([]reflect.Value, len(args))
 	for i, v := range args {
 		vals[i] = reflect.ValueOf(v)
