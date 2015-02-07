@@ -169,6 +169,10 @@ type (
 		// filter returns true for will be executed with the arguments passed
 		// to RunFiltered
 		RunFiltered(func(interface{}, []interface{}) bool, ...interface{})
+
+		// Clones an entire nodechain. Cloned chains run independent from their
+		// origin source but maintain the same internal relationships
+		Clone() Root
 	}
 
 	Waiter interface {
@@ -383,7 +387,44 @@ func (cn *chainNode) SetValidator(v Validating) error {
 	return nil
 }
 
-func clone(old *chainNode) (n *chainNode) {
+func (cn *chainNode) Clone() Root {
+	var root Root
+	n := cn.getFirst()
+	if n == nil {
+		panic("cannot clone nil chain")
+	}
+	rn := clone(n, nil)
+	root = rn
+	for n = rn.after; n != nil; n = n.after {
+		rn.after = clone(n, root)
+		rn.after.before = rn
+		rn = rn.after
+	}
+	return root
+}
+
+func clone(src *chainNode, root Root) (n *chainNode) {
+	var L sync.Locker
+
+	if rn, ok := root.(*chainNode); ok {
+		L = rn.lock
+	} else {
+		L = &sync.Mutex{}
+	}
+
+	n = &chainNode{
+		funcs:     make([]CallProxy, len(src.funcs), cap(src.funcs)),
+		wait:      &sync.WaitGroup{},
+		lock:      L,
+		validator: src.validator,
+		ftype:     src.ftype,
+	}
+
+	copy(n.funcs, src.funcs)
+	return
+}
+
+func dup(old *chainNode) (n *chainNode) {
 	n = &chainNode{
 		funcs: make([]CallProxy, 0, 1),
 		wait:  &sync.WaitGroup{},
@@ -413,7 +454,7 @@ func chainNodeLen(first *chainNode) (l int) {
 }
 
 func (cn *chainNode) insertBefore() (n *chainNode) {
-	n = clone(cn)
+	n = dup(cn)
 	if cn.before != nil {
 		cn.before.after = n
 		n.before = cn.before
@@ -424,7 +465,7 @@ func (cn *chainNode) insertBefore() (n *chainNode) {
 }
 
 func (cn *chainNode) insertAfter() (n *chainNode) {
-	n = clone(cn)
+	n = dup(cn)
 	if cn.after != nil {
 		cn.after.before = n
 		n.after = cn.after
